@@ -9,8 +9,6 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
-	"testing/fstest"
-	"time"
 
 	"github.com/operator-framework/api/pkg/operators/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,15 +39,15 @@ type Plain struct {
 	Objects []client.Object
 }
 
-func RegistryV1ToPlain(rv1 fs.FS) (fs.FS, error) {
+func RegistryV1ToPlain(rv1 fs.FS) (bytes.Buffer, error) {
 	reg := RegistryV1{}
 	fileData, err := fs.ReadFile(rv1, filepath.Join("metadata", "annotations.yaml"))
 	if err != nil {
-		return nil, err
+		return bytes.Buffer{}, err
 	}
 	annotationsFile := registry.AnnotationsFile{}
 	if err := yaml.Unmarshal(fileData, &annotationsFile); err != nil {
-		return nil, err
+		return bytes.Buffer{}, err
 	}
 	reg.PackageName = annotationsFile.Annotations.PackageName
 
@@ -58,15 +56,15 @@ func RegistryV1ToPlain(rv1 fs.FS) (fs.FS, error) {
 
 	entries, err := fs.ReadDir(rv1, manifestsDir)
 	if err != nil {
-		return nil, err
+		return bytes.Buffer{}, err
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			return nil, fmt.Errorf("subdirectories are not allowed within the %q directory of the bundle image filesystem: found %q", manifestsDir, filepath.Join(manifestsDir, e.Name()))
+			return bytes.Buffer{}, fmt.Errorf("subdirectories are not allowed within the %q directory of the bundle image filesystem: found %q", manifestsDir, filepath.Join(manifestsDir, e.Name()))
 		}
 		fileData, err := fs.ReadFile(rv1, filepath.Join(manifestsDir, e.Name()))
 		if err != nil {
-			return nil, err
+			return bytes.Buffer{}, err
 		}
 
 		dec := apimachyaml.NewYAMLOrJSONDecoder(bytes.NewReader(fileData), 1024)
@@ -77,7 +75,7 @@ func RegistryV1ToPlain(rv1 fs.FS) (fs.FS, error) {
 				break
 			}
 			if err != nil {
-				return nil, fmt.Errorf("read %q: %v", e.Name(), err)
+				return bytes.Buffer{}, fmt.Errorf("read %q: %v", e.Name(), err)
 			}
 			objects = append(objects, &obj)
 		}
@@ -89,13 +87,13 @@ func RegistryV1ToPlain(rv1 fs.FS) (fs.FS, error) {
 		case "ClusterServiceVersion":
 			csv := v1alpha1.ClusterServiceVersion{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &csv); err != nil {
-				return nil, err
+				return bytes.Buffer{}, err
 			}
 			reg.CSV = csv
 		case "CustomResourceDefinition":
 			crd := apiextensionsv1.CustomResourceDefinition{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &crd); err != nil {
-				return nil, err
+				return bytes.Buffer{}, err
 			}
 			reg.CRDs = append(reg.CRDs, crd)
 		default:
@@ -105,40 +103,41 @@ func RegistryV1ToPlain(rv1 fs.FS) (fs.FS, error) {
 
 	plain, err := Simple(reg)
 	if err != nil {
-		return nil, err
+		return bytes.Buffer{}, err
 	}
 
 	var manifest bytes.Buffer
 	for _, obj := range plain.Objects {
 		yamlData, err := yaml.Marshal(obj)
 		if err != nil {
-			return nil, err
+			return bytes.Buffer{}, err
 		}
 		if _, err := fmt.Fprintf(&manifest, "---\n%s\n", string(yamlData)); err != nil {
-			return nil, err
+			return bytes.Buffer{}, err
 		}
 	}
+	return manifest, nil
 
-	now := time.Now()
-	plainFS := fstest.MapFS{
-		".": &fstest.MapFile{
-			Data:    nil,
-			Mode:    fs.ModeDir | 0755,
-			ModTime: now,
-		},
-		"manifests": &fstest.MapFile{
-			Data:    nil,
-			Mode:    fs.ModeDir | 0755,
-			ModTime: now,
-		},
-		"manifests/manifest.yaml": &fstest.MapFile{
-			Data:    manifest.Bytes(),
-			Mode:    0644,
-			ModTime: now,
-		},
-	}
+	// now := time.Now()
+	// plainFS := fstest.MapFS{
+	// 	".": &fstest.MapFile{
+	// 		Data:    nil,
+	// 		Mode:    fs.ModeDir | 0755,
+	// 		ModTime: now,
+	// 	},
+	// 	"manifests": &fstest.MapFile{
+	// 		Data:    nil,
+	// 		Mode:    fs.ModeDir | 0755,
+	// 		ModTime: now,
+	// 	},
+	// 	"manifests/manifest.yaml": &fstest.MapFile{
+	// 		Data:    manifest.Bytes(),
+	// 		Mode:    0644,
+	// 		ModTime: now,
+	// 	},
+	// }
 
-	return plainFS, nil
+	// return plainFS, nil
 }
 
 func validateTargetNamespaces(supportedInstallModes sets.Set[string], installNamespace string, targetNamespaces []string) error {
@@ -184,15 +183,17 @@ func Convert(in RegistryV1, installNamespace string, targetNamespaces []string) 
 	if installNamespace == "" {
 		installNamespace = fmt.Sprintf("%s-system", in.PackageName)
 	}
+	fmt.Printf("Install namespace is %s\n", installNamespace)
 	supportedInstallModes := sets.New[string]()
 	for _, im := range in.CSV.Spec.InstallModes {
 		if im.Supported {
 			supportedInstallModes.Insert(string(im.Type))
+			fmt.Printf("Supported Install mode: %s\n", im.Type)
 		}
 	}
-	if !supportedInstallModes.Has(string(v1alpha1.InstallModeTypeAllNamespaces)) {
-		return nil, fmt.Errorf("AllNamespace install mode must be enabled")
-	}
+	// if !supportedInstallModes.Has(string(v1alpha1.InstallModeTypeAllNamespaces)) {
+	// 	return nil, fmt.Errorf("AllNamespace install mode must be enabled")
+	// }
 	if targetNamespaces == nil {
 		if supportedInstallModes.Has(string(v1alpha1.InstallModeTypeAllNamespaces)) {
 			targetNamespaces = []string{""}
